@@ -452,7 +452,7 @@ class simpleDiffusion(nn.Module):
 
         return val_samples
     
-    def save_checkpoint(self, accelerator, epoch):
+    def save_checkpoint(self, accelerator, epoch, checkpoint_dir=None):
         """
         A function to save the model checkpoint.
 
@@ -463,7 +463,9 @@ class simpleDiffusion(nn.Module):
         Returns:
         None
         """
-        checkpoint_dir = os.path.join(self.config.experiment_path, "checkpoints")
+
+        if checkpoint_dir is None:
+            checkpoint_dir = os.path.join(self.config.experiment_path, "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)
         
         # Save accelerator state
@@ -579,7 +581,6 @@ class simpleDiffusion(nn.Module):
                     # Diffuse x to z_t
                     z_t, eps_t = self.diffuse(x, alpha_t, sigma_t)
 
-                    # 3) Have the teacher run 2 DDIM steps:
                     t_prime  = torch.clamp(t - 0.5 / N, min=0.0)
                     t_dprime = torch.clamp(t - 1.0 / N, min=0.0)
 
@@ -597,7 +598,7 @@ class simpleDiffusion(nn.Module):
                     sigma_tdprime = torch.sqrt(torch.sigmoid(-logsnr_tdprime)).view(-1,1,1,1)
 
                     with torch.no_grad():
-                        eps_teacher = (z_tdprime - alpha_tdprime/alpha_t*z_t)/(sigma_tdprime-alpha_tdprime/alpha_t*sigma_t)
+                        eps_teacher = (z_tdprime - alpha_tdprime/alpha_t*z_t)/(sigma_tdprime-alpha_tdprime/alpha_t*sigma_t) # same formula from https://arxiv.org/pdf/2202.00512 but converted to predict noise
                         
                     pred_student = student_model(z_t, logsnr_t)
 
@@ -632,10 +633,9 @@ class simpleDiffusion(nn.Module):
             teacher_model.load_state_dict(student_model.state_dict())
 
             if accelerator.is_main_process:
-                checkpoint_dir = os.path.join(self.config.experiment_path, "distill_checkpoints")
+                checkpoint_dir = os.path.join(self.config.experiment_path, "distill_checkpoints", f"distilled_stage_{stage+1}")
                 os.makedirs(checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(checkpoint_dir, f"distilled_stage_{stage+1}")
-                self.save_checkpoint(accelerator, checkpoint_path)
+                self.save_checkpoint(accelerator, stage, checkpoint_dir)
 
             # 8) Halve the teacher sampling steps (N <- N/2)
             N = max(N // 2, 1)
