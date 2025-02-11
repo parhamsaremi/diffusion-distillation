@@ -28,10 +28,9 @@ class DistillationConfig:
     ema_update_freq = 10
 
     # Distillation parameters
-    distill_stages = 6      # K: how many times we halve the teacher’s sampling steps
+    distill_stages = 5      # K: how many times we halve the teacher’s sampling steps
     initial_N = 128           # initial teacher sampling steps
     distill_epochs = 100      # how many epochs to distill per stage
-    ddim_eta = 0.0          # DDIM η=0 => deterministic
 
     # Experiment parameters
     resume = False  # not strictly used here; can adapt if you want to load teacher differently
@@ -39,7 +38,7 @@ class DistillationConfig:
     save_image_epochs = 50
     evaluation_batches = 1
     mixed_precision = "fp16"
-    experiment_path = "/cim/parhamsa/simpleDiffusion/ddpm-butterflies-128-distilled"
+    experiment_path = "/home/mila/p/parham.saremi/simpleDiffusion/ddpm-butterflies-wavelet"
 
     # Model/backbone parameters
     image_size = 128
@@ -51,10 +50,7 @@ class DistillationConfig:
     noise_d = 64
     sampling_steps = 128  # not used in teacher sampling, since teacher steps are progressive
     seed = 0
-
-    # Path to the teacher checkpoint (you must have this from your earlier training)
-    teacher_checkpoint_path = "/cim/parhamsa/simpleDiffusion/ddpm-butterflies-128/checkpoints"
-
+    
 def main():
     config = DistillationConfig
 
@@ -85,12 +81,13 @@ def main():
 
     # Set up the same backbone architecture
     backbone = UNetCondition2D(
-        sample_size=config.image_size,
-        in_channels=12,
-        out_channels=12,
-        layers_per_block=(1,2,8,2),
-        block_out_channels=(128,256,512,768),
+        sample_size=config.image_size,  # the target image resolution
+        in_channels=12,  # the number of input channels, 3 for RGB images
+        out_channels=12,  # the number of output channels
+        layers_per_block=(1,2,2,8,2),  # how many ResNet layers to use per UNet block
+        block_out_channels=(128,128,256,512,768),  # the number of output channels for each UNet block
         down_block_types=(
+            "DownBlock2D",
             "DownBlock2D",
             "DownBlock2D",
             "AttnDownBlock2D",
@@ -99,6 +96,7 @@ def main():
         up_block_types=(
             "AttnUpBlock2D",
             "AttnUpBlock2D",
+            "UpBlock2D",
             "UpBlock2D",
             "UpBlock2D",
         ),
@@ -111,21 +109,20 @@ def main():
         config=config,
     )
 
-    optimizer = torch.optim.Adam(backbone.parameters(), lr=config.learning_rate)
-    lr_scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=config.lr_warmup_steps,
-        num_training_steps=len(train_loader) * config.distill_stages,
-    )
+    # optimizer = torch.optim.Adam(backbone.parameters(), lr=config.learning_rate)
+    # lr_scheduler = get_cosine_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=config.lr_warmup_steps,
+    #     num_training_steps=len(train_loader) * config.distill_epochs,
+    # )
 
     student_diffusion_model.distill(
-        optimizer=optimizer,
+        # optimizer=optimizer,
         train_dataloader=train_loader,
-        lr_scheduler=lr_scheduler,
+        # lr_scheduler=lr_scheduler,
         K=config.distill_stages,
         initial_N=config.initial_N,
         distill_epochs=config.distill_epochs,
-        eta=config.ddim_eta,
     )
 
 

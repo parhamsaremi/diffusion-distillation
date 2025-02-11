@@ -511,10 +511,7 @@ class simpleDiffusion(nn.Module):
     
     def distill(
         self,
-        teacher_model,
-        optimizer,
         train_dataloader,
-        lr_scheduler,
         K: int = 2,                # Number of "halving" iterations
         initial_N: int = 4,        # Initial number of sampling steps for teacher
         distill_epochs: int = 1,   # How many epochs of distillation per iteration
@@ -533,38 +530,52 @@ class simpleDiffusion(nn.Module):
             distill_epochs (int): Epochs of distillation per stage.
             eta (float): DDIM eta parameter (controls stochasticity).
         """
-        assert K > torch.log2(N), "Initial number of steps must be a power of 2."
+        assert math.log2(initial_N) > K, "Initial number of steps must be greater than 2**num_stages"
+
         accelerator = Accelerator(
             mixed_precision=self.config.mixed_precision,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             project_dir=self.config.experiment_path,
         )
 
-        student_model, teacher_model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
-            self.model, self.ema, optimizer, train_dataloader, val_dataloader, lr_scheduler
+        student_model, teacher_model, train_dataloader = accelerator.prepare( 
+            self.model, self.ema, train_dataloader
         ) # ema is loaded in the teacher
 
         checkpoint_path = os.path.join(self.config.experiment_path, "checkpoints")
-        start_epoch = self.load_checkpoint(checkpoint_path, accelerator)
+        self.load_checkpoint(checkpoint_path, accelerator)
+
+        optimizer = torch.optim.Adam(student_model.parameters(), lr=self.config.learning_rate)
+        lr_scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=self.config.lr_warmup_steps,
+            num_training_steps=len(train_dataloader) * self.config.distill_stages,
+        )
+
+        optimizer, lr_scheduler = accelerator.prepare(optimizer, lr_scheduler)
+
+        teacher_model = teacher_model.ema_model
+        student_model.load_state_dict(teacher_model.state_dict())
 
         # Progressive loop: each iteration halves N and makes the newly trained student the next teacher
         N = initial_N
         for stage in range(K):
-            student_model.load_state_dict(teacher_model.state_dict())
             # Reset the optimizer and scheduler
-            optimizer = torch.optim.Adam(student_model.parameters(), lr=self.config.learning_rate)
-            lr_scheduler = get_cosine_schedule_with_warmup(
+
+            optimizer.load_state_dict(torch.optim.Adam(student_model.parameters(), lr=self.config.learning_rate).state_dict())
+            lr_scheduler.load_state_dict(get_cosine_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=self.config.lr_warmup_steps,
                 num_training_steps=len(train_dataloader) * self.config.distill_stages,
-            )
-            optimizer, lr_scheduler = accelerator.prepare(optimizer, lr_scheduler)
+            ).state_dict())
+            
+
             # Require no gradient for the teacher
             for param in teacher_model.parameters():
                 param.requires_grad = False
 
 
-            for epoch in range(distill_epochs):
+            for epoch in tqdm(range(distill_epochs), desc=f"Distilling stage {stage}"):
                 student_model.train()
                 for _, batch in enumerate(train_dataloader):
                     x = batch["images"]
@@ -585,14 +596,14 @@ class simpleDiffusion(nn.Module):
                     t_dprime = torch.clamp(t - 1.0 / N, min=0.0)
 
                     # Teacher step from t to t'
-                    logsnr_tprime  = self.schedule(t_prime ).to(x.device)
+                    logsnr_tprime  = self.schedule(t_prime).to(x.device)
                     pred_teacher_1 = teacher_model(z_t, logsnr_t)
-                    z_tprime = self.ddim_sampler_step(z_t, pred_teacher_1, logsnr_t, logsnr_tprime)
+                    z_tprime = self.ddim_sampler_step(z_t, pred_teacher_1, logsnr_t.reshape(-1,1,1,1), logsnr_tprime.reshape(-1,1,1,1))
 
                     # Teacher step from t' to t''
                     logsnr_tdprime = self.schedule(t_dprime).to(x.device)
                     pred_teacher_2 = teacher_model(z_tprime, logsnr_tprime)
-                    z_tdprime = self.ddim_sampler_step(z_tprime, pred_teacher_2, logsnr_tprime, logsnr_tdprime)
+                    z_tdprime = self.ddim_sampler_step(z_tprime, pred_teacher_2, logsnr_tprime.reshape(-1,1,1,1), logsnr_tdprime.reshape(-1,1,1,1))
 
                     alpha_tdprime = torch.sqrt(torch.sigmoid(logsnr_tdprime)).view(-1,1,1,1)
                     sigma_tdprime = torch.sqrt(torch.sigmoid(-logsnr_tdprime)).view(-1,1,1,1)
