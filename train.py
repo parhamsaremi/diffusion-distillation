@@ -31,7 +31,7 @@ class TrainingConfig:
     save_image_epochs = 50 # how often to save generated images
     evaluation_batches = 1 # the number of batches to use for evaluation
     mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
-    experiment_path = "/home/mila/g/gian.favero/simpleDiffusion/ddpm-butterflies-wavelet" # codebase root directory
+    experiment_path = "/cim/parhamsa/simpleDiffusion/ddpm-butterflies-wavelet" # codebase root directory
     
     # Model parameters
     image_size = 128  # the generated image resolution
