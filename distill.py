@@ -19,8 +19,8 @@ from diffusion.simple_diffusion import simpleDiffusion
 
 class DistillationConfig:
     # Optimization parameters
-    learning_rate = 5e-5
-    lr_warmup_steps = 10000
+    learning_rate = 1e-4
+    lr_warmup_steps = 1000
     train_batch_size = 4
     gradient_accumulation_steps = 1
     ema_beta = 0.9999
@@ -38,7 +38,7 @@ class DistillationConfig:
     save_image_epochs = 50
     evaluation_batches = 1
     mixed_precision = "fp16"
-    experiment_path = "/home/mila/p/parham.saremi/simpleDiffusion/ddpm-butterflies-wavelet"
+    experiment_path = "/home/mila/p/parham.saremi/simpleDiffusion/ddpm-butterflies-128"
 
     # Model/backbone parameters
     image_size = 128
@@ -68,7 +68,7 @@ def main():
     def transform(examples):
         images = [preprocess(img.convert("RGB")) for img in examples["image"]]
         # wavelet decomposition
-        images = [wavelet_dec_2(image) / 2 for image in images]
+        # images = [wavelet_dec_2(image) / 2 for image in images]
         return {"images": images}
 
     dataset.set_transform(transform)
@@ -82,8 +82,8 @@ def main():
     # Set up the same backbone architecture
     backbone = UNetCondition2D(
         sample_size=config.image_size,  # the target image resolution
-        in_channels=12,  # the number of input channels, 3 for RGB images
-        out_channels=12,  # the number of output channels
+        in_channels=3,  # the number of input channels, 3 for RGB images
+        out_channels=3,  # the number of output channels
         layers_per_block=(1,2,2,8,2),  # how many ResNet layers to use per UNet block
         block_out_channels=(128,128,256,512,768),  # the number of output channels for each UNet block
         down_block_types=(

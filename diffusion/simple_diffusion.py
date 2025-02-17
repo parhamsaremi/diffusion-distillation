@@ -17,6 +17,11 @@ from torch.special import expm1
 from accelerate import Accelerator
 from tqdm import tqdm
 from ema_pytorch import EMA
+from utils.wavelet import wavelet_enc_2
+from copy import deepcopy
+
+import matplotlib.pyplot as plt
+
 import time
 
 from diffusers.optimization import get_cosine_schedule_with_warmup
@@ -217,6 +222,7 @@ class simpleDiffusion(nn.Module):
             z_{t-1} (torch.Tensor): The latent at the next time step.
         """
         # Compute alpha and sigma values for current and next timesteps.
+        c = torch.exp((logsnr_t-logsnr_s)/2)
         alpha_t = torch.sqrt(torch.sigmoid(logsnr_t))  # sqrt(bar_alpha_t)
         alpha_s = torch.sqrt(torch.sigmoid(logsnr_s))  # sqrt(bar_alpha_s)
         sigma_t = torch.sqrt(torch.sigmoid(-logsnr_t))   # sqrt(1 - bar_alpha_t)
@@ -232,13 +238,13 @@ class simpleDiffusion(nn.Module):
 
         x_pred = self.clip(x_pred)
 
-        z_prev = alpha_s * x_pred + sigma_s * eps
+        z_prev = c * alpha_s/alpha_t * z_t + (1-c) * alpha_s * x_pred
 
         return z_prev
 
 
     @torch.no_grad()
-    def sample(self, x):
+    def sample(self, x, model=None, ddpm=True):
         """
         Standard DDPM sampling procedure. Begun by sampling z_T ~ N(0, 1)
         and then repeatedly sampling z_s ~ p(z_s | z_t)
@@ -249,6 +255,10 @@ class simpleDiffusion(nn.Module):
         Returns:
         x_pred (torch.Tensor): The predicted tensor.
         """
+
+        if model is None:
+            model = self.ema
+
         z_t = torch.randn(x.shape).to(x.device)
 
         # Create evenly spaced steps, e.g., for sampling_steps=5 -> [1.0, 0.8, 0.6, 0.4, 0.2]
@@ -262,17 +272,54 @@ class simpleDiffusion(nn.Module):
             logsnr_t = self.schedule(u_t).to(x.device).unsqueeze(0)
             logsnr_s = self.schedule(u_s).to(x.device).unsqueeze(0)
 
-            pred = self.ema(z_t, logsnr_t)
+            pred = model(z_t, logsnr_t)
 
-            mu, variance = self.ddpm_sampler_step(z_t, pred, logsnr_t.clone().detach(), logsnr_s.clone().detach())
-            z_t = mu + torch.randn_like(mu) * torch.sqrt(variance)
+            if ddpm:
+                mu, variance = self.ddpm_sampler_step(z_t, pred, logsnr_t.clone().detach(), logsnr_s.clone().detach())
+                z_t = mu + torch.randn_like(mu) * torch.sqrt(variance)
+                # sample_item = z_t[0] * 2
+                # sample_item = wavelet_enc_2(sample_item) * 0.5 + 0.5
+                # pred = sample_item.cpu().detach().numpy().transpose(1, 2, 0)
+
+                # plt.imshow(pred)
+                # plt.axis('off')
+
+                # # Make sure the output directory exists
+                # os.makedirs("temp_ddpm_distill", exist_ok=True)
+
+                # plt.savefig(
+                #     f"temp_ddpm_distill/sample_{i}.png"
+                # )
+                # plt.close()
+            else:
+                mu = self.ddim_sampler_step(z_t, pred, logsnr_t.clone().detach(), logsnr_s.clone().detach())
+                z_t = mu 
+                # sample_item = z_t[0] * 2
+                # sample_item = wavelet_enc_2(sample_item) * 0.5 + 0.5
+                # pred = sample_item.cpu().detach().numpy().transpose(1, 2, 0)
+
+                # plt.imshow(pred)
+                # plt.axis('off')
+
+                # # Make sure the output directory exists
+                # os.makedirs("temp_distill", exist_ok=True)
+
+                # plt.savefig(
+                #     f"temp_distill/sample_{i}.png"
+                # )
+                # plt.close()
+                
+
 
         # Final step
         logsnr_1 = self.schedule(steps[-2]).to(x.device).unsqueeze(0)
         logsnr_0 = self.schedule(steps[-1]).to(x.device).unsqueeze(0)
 
         pred = self.model(z_t, logsnr_1)
-        x_pred, _ = self.ddpm_sampler_step(z_t, pred, logsnr_1.clone().detach(), logsnr_0.clone().detach())
+        if ddpm:
+            x_pred, _ = self.ddpm_sampler_step(z_t, pred, logsnr_1.clone().detach(), logsnr_0.clone().detach())
+        else:
+            x_pred = self.ddim_sampler_step(z_t, pred, logsnr_1.clone().detach(), logsnr_0.clone().detach())
         
         x_pred = self.clip(x_pred)
 
@@ -298,21 +345,24 @@ class simpleDiffusion(nn.Module):
         z_t, eps_t = self.diffuse(x, alpha_t, sigma_t)
         pred = self.model(z_t, logsnr_t)
 
-        if self.pred_param == 'v':
-            eps_pred = sigma_t * z_t + alpha_t * pred
-        else: 
-            eps_pred = pred
+        # if self.pred_param == 'v':
+        #     eps_pred = sigma_t * z_t + alpha_t * pred
+        # else: 
+        #     eps_pred = pred
 
-        # Apply min-SNR weighting (https://arxiv.org/pdf/2303.09556)
-        snr = torch.exp(logsnr_t).clamp_(max = 5)
-        if self.pred_param == 'v':
-            weight = 1 / (1 + snr)
-        else:
-            weight = 1 / snr
+        # # Apply min-SNR weighting (https://arxiv.org/pdf/2303.09556)
+        # snr = torch.exp(logsnr_t).clamp_(max = 5)
+        # if self.pred_param == 'v':
+        #     weight = 1 / (1 + snr)
+        # else:
+        #     weight = 1 / snr
 
-        weight = weight.view(-1, 1, 1, 1)
+        # weight = weight.view(-1, 1, 1, 1)
 
-        loss = torch.mean(weight * (eps_pred - eps_t) ** 2)
+        # loss = torch.mean(weight * (eps_pred - eps_t) ** 2)
+
+        v_t = (eps_t - sigma_t * z_t) / alpha_t
+        loss = torch.mean((pred - v_t) ** 2)
 
         return loss
 
@@ -513,8 +563,8 @@ class simpleDiffusion(nn.Module):
         self,
         train_dataloader,
         K: int = 2,                # Number of "halving" iterations
-        initial_N: int = 4,        # Initial number of sampling steps for teacher
-        distill_epochs: int = 1,   # How many epochs of distillation per iteration
+        initial_N: int = 4,        # Initial number of sampling steps for student
+        distill_epochs: int = 1,   # How many epochs of distillation per iteration,
     ):
         """
         Distill a trained teacher model into fewer sampling steps, following Algorithm 2
@@ -532,51 +582,48 @@ class simpleDiffusion(nn.Module):
         """
         assert math.log2(initial_N) > K, "Initial number of steps must be greater than 2**num_stages"
 
-        accelerator = Accelerator(
-            mixed_precision=self.config.mixed_precision,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            project_dir=self.config.experiment_path,
-        )
-
-        student_model, teacher_model, train_dataloader = accelerator.prepare( 
-            self.model, self.ema, train_dataloader
-        ) # ema is loaded in the teacher
-
-        checkpoint_path = os.path.join(self.config.experiment_path, "checkpoints")
-        self.load_checkpoint(checkpoint_path, accelerator)
-
-        optimizer = torch.optim.Adam(student_model.parameters(), lr=self.config.learning_rate)
-        lr_scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=self.config.lr_warmup_steps,
-            num_training_steps=len(train_dataloader) * self.config.distill_stages,
-        )
-
-        optimizer, lr_scheduler = accelerator.prepare(optimizer, lr_scheduler)
-
-        teacher_model = teacher_model.ema_model
-        student_model.load_state_dict(teacher_model.state_dict())
-
+    
         # Progressive loop: each iteration halves N and makes the newly trained student the next teacher
         N = initial_N
         for stage in range(K):
             # Reset the optimizer and scheduler
+            accelerator = Accelerator(
+                mixed_precision=self.config.mixed_precision,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                project_dir=self.config.experiment_path,
+            )
 
-            optimizer.load_state_dict(torch.optim.Adam(student_model.parameters(), lr=self.config.learning_rate).state_dict())
-            lr_scheduler.load_state_dict(get_cosine_schedule_with_warmup(
+            student_model, train_dataloader = accelerator.prepare( 
+                self.model, train_dataloader
+            ) # ema is loaded in the teacher
+
+            if stage == 0:
+                checkpoint_path = os.path.join(self.config.experiment_path, "checkpoints")
+            else:
+                checkpoint_path = os.path.join(self.config.experiment_path, "distill_checkpoints", f"distilled_stage_{stage}")
+            self.load_checkpoint(checkpoint_path, accelerator)
+
+            # teacher_model = teacher_model.ema_model
+            teacher_model = deepcopy(student_model)
+            teacher_model.to(student_model.device)
+            # student_model.load_state_dict(teacher_model.state_dict())
+
+            optimizer = torch.optim.Adam(student_model.parameters(), lr=self.config.learning_rate)
+            lr_scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=self.config.lr_warmup_steps,
-                num_training_steps=len(train_dataloader) * self.config.distill_stages,
-            ).state_dict())
-            
+                num_training_steps=len(train_dataloader) * self.config.distill_epochs,
+            )
+
+            optimizer, lr_scheduler = accelerator.prepare(optimizer, lr_scheduler)
+
 
             # Require no gradient for the teacher
             for param in teacher_model.parameters():
                 param.requires_grad = False
 
-
+            student_model.train()
             for epoch in tqdm(range(distill_epochs), desc=f"Distilling stage {stage}"):
-                student_model.train()
                 for _, batch in enumerate(train_dataloader):
                     x = batch["images"]
 
@@ -609,26 +656,30 @@ class simpleDiffusion(nn.Module):
                     sigma_tdprime = torch.sqrt(torch.sigmoid(-logsnr_tdprime)).view(-1,1,1,1)
 
                     with torch.no_grad():
-                        eps_teacher = (z_tdprime - alpha_tdprime/alpha_t*z_t)/(sigma_tdprime-alpha_tdprime/alpha_t*sigma_t) # same formula from https://arxiv.org/pdf/2202.00512 but converted to predict noise
-                        
+                        # eps_teacher = (z_tdprime - alpha_tdprime/alpha_t*z_t)/(sigma_tdprime-alpha_tdprime/alpha_t*sigma_t) # same formula from https://arxiv.org/pdf/2202.00512 but converted to predict noise
+                        x_teacher = (z_tdprime - sigma_tdprime/sigma_t*z_t)/(alpha_tdprime-sigma_tdprime/sigma_t*alpha_t)
+                        x_teacher = self.clip(x_teacher)
+
                     pred_student = student_model(z_t, logsnr_t)
 
                     if self.pred_param == 'v':
-                        eps_student = sigma_t * z_t + alpha_t * pred_student
+                        x_student = alpha_t * z_t - sigma_t * pred_student
                     elif self.pred_param == 'eps':
-                        eps_student = pred_student
-
+                        x_student = (z_t - sigma_t * pred_student) / alpha_t
+                    x_student = self.clip(x_student)
 
                     # Apply min-SNR weighting (https://arxiv.org/pdf/2303.09556)
-                    snr = torch.exp(logsnr_t).clamp_(max = 5)
-                    if self.pred_param == 'v':
-                        weight = 1 / (1 + snr)
-                    else:
-                        weight = 1 / snr
+                    # snr = torch.exp(logsnr_t).clamp_(max = 5)
+                    snr = (alpha_t/sigma_t)**2
+                    # if self.pred_param == 'v':
+                    #     weight = 1 / (1 + snr)
+                    # else:
+                    #     weight = 1 / snr
+                    weight = 1 + snr
 
                     weight = weight.view(-1, 1, 1, 1)
 
-                    loss = torch.mean(weight * (eps_student - eps_teacher) ** 2)
+                    loss = torch.mean(weight * (x_student - x_teacher) ** 2)
 
                     loss = loss.to(next(student_model.parameters()).dtype)
 
@@ -648,8 +699,141 @@ class simpleDiffusion(nn.Module):
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 self.save_checkpoint(accelerator, stage, checkpoint_dir)
 
-            # 8) Halve the teacher sampling steps (N <- N/2)
+            # 8) Halve the student sampling steps (N <- N/2)
             N = max(N // 2, 1)
 
             if accelerator.is_main_process:
                 print(f"Distillation stage {stage+1}/{K} complete. New teacher steps = {N}.")
+            del accelerator
+
+    @torch.no_grad()
+    def inference(
+        self,
+        val_dataloader,
+        checkpoint_path,
+        fid_calculator,
+        num_images_to_eval=5000,
+        num_images_to_save=64,
+        plot_function=None,
+        use_ema=True
+    ):
+        """
+        Evaluate the FID of this model on a given dataset and save some generated samples.
+
+        Steps:
+            1) Initialize Accelerator (similar to train/distill).
+            2) Load checkpoint from `checkpoint_path`.
+            3) Prepare dataloader under Accelerator.
+            4) Generate `num_images_to_eval` synthetic images (using raw or EMA model).
+            5) Gather `num_images_to_eval` real images from dataloader.
+            6) Compute FID using `fid_calculator`.
+            7) Save up to `num_images_to_save` generated samples to disk.
+
+        Args:
+            val_dataloader (DataLoader): A dataloader for real images.
+            checkpoint_path (str): Directory that contains model checkpoint files.
+            fid_calculator (callable): A function or library that computes FID given real & fake images.
+            num_images_to_eval (int): How many images to generate & compare for FID.
+            num_images_to_save (int): How many generated images to write to disk.
+            device (str): Device on which to run inference, e.g. "cuda".
+            use_ema (bool): If True, use EMA weights for sampling, else use raw model weights.
+
+        Returns:
+            float: The computed FID score.
+        """
+
+        accelerator = Accelerator(
+            mixed_precision=self.config.mixed_precision,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            project_dir=self.config.experiment_path,
+        )
+
+        # Prepare the model, optimizer, dataloaders, and learning rate scheduler
+
+
+        if use_ema:
+            _, sampler_model, val_dataloader = accelerator.prepare( 
+                self.model, self.ema, val_dataloader
+            )
+        else:
+            sampler_model, val_dataloader = accelerator.prepare( 
+                self.model, val_dataloader
+            )
+            print("############# here ###############")
+        _ = self.load_checkpoint(checkpoint_path, accelerator)
+
+        sampler_model.eval()
+
+        # -------------------------------------------------------------------------
+        # 3) Generate Synthetic Images
+        # -------------------------------------------------------------------------
+        images_needed = num_images_to_eval
+
+        generated_images = []
+        real_images = []
+        for batch in tqdm(val_dataloader):
+            samples = self.sample(batch["images"], sampler_model, ddpm=False)
+            generated_images.append(samples.detach().cpu())
+            real_images.append(batch["images"].cpu())
+
+            if sum(x.shape[0] for x in real_images) >= images_needed:
+                break
+
+        real_images = torch.cat(real_images, dim=0)
+        real_images = real_images[:images_needed]
+        
+        generated_images = torch.cat(generated_images, dim=0)
+        generated_images = generated_images[:images_needed]
+        if accelerator.is_main_process:
+            print(f"[Inference] Generated {len(generated_images)} synthetic images.")
+
+        if accelerator.is_main_process:
+            print(f"[Inference] Collected {len(real_images)} real images.")
+
+        real_images_rgb = []
+
+        for sample in real_images:
+            # sample_item = sample * 2
+            # sample_item = wavelet_enc_2(sample_item) * 0.5 + 0.5
+            sample_item = sample * 0.5 + 0.5
+            sample_item = (sample_item * 255).clamp(0,255).to(torch.uint8)
+            real_images_rgb.append(sample_item.unsqueeze(0))
+        real_images_rgb = torch.cat(real_images_rgb, dim=0)
+
+        generated_images_rbg = []
+        for sample in generated_images:
+            # sample_item = sample * 2
+            # sample_item = wavelet_enc_2(sample_item) * 0.5 + 0.5
+            sample_item = sample * 0.5 + 0.5
+            sample_item = (sample_item * 255).clamp(0,255).to(torch.uint8)
+            generated_images_rbg.append(sample_item.unsqueeze(0))
+        
+        generated_images_rbg = torch.cat(generated_images_rbg, dim=0)
+
+        fid_score = fid_calculator(real_images_rgb, generated_images_rbg)
+
+        if accelerator.is_main_process:
+            print(f"[Inference] FID = {fid_score:.4f}")
+
+
+        if accelerator.is_main_process:
+            inference_dir = os.path.join(checkpoint_path, f"inference_images_{self.config.sampling_steps}")
+            os.makedirs(inference_dir, exist_ok=True)
+
+            num_to_save = min(num_images_to_save, len(generated_images))
+
+            if plot_function is not None:
+                plot_function(
+                    output_dir=inference_dir,
+                    samples=[gen_img.unsqueeze(0) for gen_img in generated_images[:num_to_save]],
+                    epoch=100,
+                    process_idx=accelerator.state.process_index,
+                )
+
+
+            print(f"[Inference] Saved {num_to_save} samples to {inference_dir}")
+
+        # -------------------------------------------------------------------------
+        # Return the FID score
+        # -------------------------------------------------------------------------
+        return fid_score

@@ -31,7 +31,7 @@ class TrainingConfig:
     save_image_epochs = 50 # how often to save generated images
     evaluation_batches = 1 # the number of batches to use for evaluation
     mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision
-    experiment_path = "/cim/parhamsa/simpleDiffusion/ddpm-butterflies-wavelet" # codebase root directory
+    experiment_path = "/home/mila/p/parham.saremi/simpleDiffusion/ddpm-butterflies-128" # codebase root directory
     
     # Model parameters
     image_size = 128  # the generated image resolution
@@ -66,7 +66,7 @@ def main():
         images = [preprocess(image.convert("RGB")) for image in examples["image"]]
 
         # Do a wavelet decomposition on the images
-        images = [wavelet_dec_2(image) / 2 for image in images]
+        # images = [wavelet_dec_2(image) / 2 for image in images]
 
         return {"images": images}
 
@@ -83,8 +83,8 @@ def main():
         # ADM channel maps for 64x64 images with more ResBlocks at 16x16
         backbone = UNetCondition2D(
             sample_size=config.image_size,  # the target image resolution
-            in_channels=12,  # the number of input channels, 3 for RGB images
-            out_channels=12,  # the number of output channels
+            in_channels=3,  # the number of input channels, 3 for RGB images
+            out_channels=3,  # the number of output channels
             layers_per_block=(1,2,2,8,2),  # how many ResNet layers to use per UNet block
             block_out_channels=(128,128,256,512,768),  # the number of output channels for each UNet block
             down_block_types=(
